@@ -1,10 +1,12 @@
 "use strict";
 
-function ownKeys(object, enumerableOnly) { var keys = Object.keys(object); if (Object.getOwnPropertySymbols) { var symbols = Object.getOwnPropertySymbols(object); enumerableOnly && (symbols = symbols.filter(function (sym) { return Object.getOwnPropertyDescriptor(object, sym).enumerable; })), keys.push.apply(keys, symbols); } return keys; }
+function ownKeys(object, enumerableOnly) { var keys = Object.keys(object); if (Object.getOwnPropertySymbols) { var symbols = Object.getOwnPropertySymbols(object); if (enumerableOnly) symbols = symbols.filter(function (sym) { return Object.getOwnPropertyDescriptor(object, sym).enumerable; }); keys.push.apply(keys, symbols); } return keys; }
 
-function _objectSpread(target) { for (var i = 1; i < arguments.length; i++) { var source = null != arguments[i] ? arguments[i] : {}; i % 2 ? ownKeys(Object(source), !0).forEach(function (key) { _defineProperty(target, key, source[key]); }) : Object.getOwnPropertyDescriptors ? Object.defineProperties(target, Object.getOwnPropertyDescriptors(source)) : ownKeys(Object(source)).forEach(function (key) { Object.defineProperty(target, key, Object.getOwnPropertyDescriptor(source, key)); }); } return target; }
+function _objectSpread(target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i] != null ? arguments[i] : {}; if (i % 2) { ownKeys(Object(source), true).forEach(function (key) { _defineProperty(target, key, source[key]); }); } else if (Object.getOwnPropertyDescriptors) { Object.defineProperties(target, Object.getOwnPropertyDescriptors(source)); } else { ownKeys(Object(source)).forEach(function (key) { Object.defineProperty(target, key, Object.getOwnPropertyDescriptor(source, key)); }); } } return target; }
 
 function _defineProperty(obj, key, value) { if (key in obj) { Object.defineProperty(obj, key, { value: value, enumerable: true, configurable: true, writable: true }); } else { obj[key] = value; } return obj; }
+
+/* eslint-disable consistent-return */
 
 /* API Includes */
 var StoreMgr = require('dw/catalog/StoreMgr');
@@ -34,7 +36,7 @@ var _require = require('*/cartridge/scripts/util/handleStoreShipment'),
 
 var boltShippingTaxHook = require('*/cartridge/scripts/cart/boltShippingTaxHook');
 
-var _require2 = require('*/cartridge/scripts/giftcard/giftCardDomainService'),
+var _require2 = require('*/cartridge/scripts/bolt/giftcard/purchaseUtils'),
     hasDigitalGiftCards = _require2.hasDigitalGiftCards;
 /* Global variables */
 
@@ -59,44 +61,6 @@ function checkItemQuantity(currentBasket, req) {
   return isItemQuantityMatched;
 }
 /**
- * shouldValidateInventory returns if we need to validate SFCC inventory as part of our pre auth.
- * Some merchants use third party inventory management systems, so we don't rely on inventory checks from SFCC
- * @returns {boolean} true or false if set and true by default.
- */
-
-
-function shouldValidateInventory() {
-  var config = utils.getConfiguration();
-
-  if (config.boltEnableInventoryCheck === '') {
-    log.error('boltEnableInventoryCheck attribute missing in metadata! Please update the sandbox metadata.');
-    return true;
-  }
-
-  return config.boltEnableInventoryCheck;
-}
-/**
- * validateStoreInventory returns if a given storeRecord has enough inventory for the item quantity being ordered.
- * @param {Object} storeRecord - store record holding inventory of all items
- * @param {Object} item - item object being orderd
- * @returns {boolean} true or false
- */
-
-
-function validateStoreInventory(storeRecord, item) {
-  var ociInventory = !!(storeRecord && storeRecord.ATO);
-  var regularInventory = !!(storeRecord && storeRecord.ATS);
-  var inventoryError = ociInventory ? ociInventory.value < item.quantityValue : regularInventory.value < item.quantityValue;
-
-  if (inventoryError) {
-    var error = ociInventory ? 'OCI inventory depleted  for item: ' : 'SFCC inventory depleted for item: ';
-    log.error(error + item.productID);
-    return false;
-  }
-
-  return true;
-}
-/**
  * Validate basket for checkout
  * @param {Object} basket - current basket
  * @returns {Object} return inventory true or false
@@ -104,13 +68,9 @@ function validateStoreInventory(storeRecord, item) {
 
 
 function validateProducts(basket) {
-  var validResult = {
+  var result = {
     error: false,
     hasInventory: true
-  };
-  var invalidResult = {
-    error: true,
-    hasInventory: false
   };
   var productLineItems = basket.productLineItems;
 
@@ -118,7 +78,8 @@ function validateProducts(basket) {
     var item = productLineItems[i];
 
     if (item.product === null || !item.product.online) {
-      return invalidResult;
+      result.error = true;
+      return;
     }
 
     if (Object.hasOwnProperty.call(item.custom, 'fromStoreId') && item.custom.fromStoreId) {
@@ -129,32 +90,25 @@ function validateProducts(basket) {
         storeInventory = ProductInventoryMgr.getInventoryList(store.custom.inventoryListId);
       }
 
-      var storeRecord = storeInventory.getRecord(item.productID);
-
-      if (!validateStoreInventory(storeRecord, item)) {
-        return invalidResult;
-      }
+      result.hasInventory = storeInventory.getRecord(item.productID) && storeInventory.getRecord(item.productID).ATS.value >= item.quantityValue;
     } else {
       var availabilityLevels = item.product.availabilityModel.getAvailabilityLevels(item.quantityValue);
-
-      if (!availabilityLevels.notAvailable.value === 0) {
-        return invalidResult;
-      }
+      result.hasInventory = availabilityLevels.notAvailable.value === 0;
     }
   }
 
-  return validResult;
+  return result;
 }
 /**
  * Update shipping method of SFCC cart which is selected in bolt modal
- * @param {dw.order.Basket} basket - cart object
+ * @param {Object} cart - cart object
  * @param {Object} req - bolt order hook request object
  */
 
 
-function updateSelectedShippingMethod(basket, req) {
+function updateSelectedShippingMethod(cart, req) {
   // Add shipping method to cart
-  if (req && basket.getProductLineItems().length === 0) {
+  if (req && cart.getProductLineItems().length === 0) {
     return;
   }
 
@@ -173,16 +127,16 @@ function updateSelectedShippingMethod(basket, req) {
     lastName: req.order.cart.billing_address.last_name || '',
     phone: req.order.cart.billing_address.phone || ''
   };
-  var productLineItems = basket.getProductLineItems();
+  var productLineItems = cart.getProductLineItems();
   var shippingMethodId = doesNotRequireShipment(productLineItems);
-  var hasEgiftCards = hasDigitalGiftCards(basket);
+  var hasEgiftCards = hasDigitalGiftCards(productLineItems) || cart.getGiftCertificateLineItems().length > 0;
   var defaultShippingSelected = false;
 
   if (shippingMethodId) {
     // all items are in store pickup， set address to the store
-    var iter = productLineItems.iterator(); // only set the store address to the default shipping so only need to do it once
+    var iter = productLineItems.iterator();
 
-    if (iter.hasNext()) {
+    while (iter.hasNext()) {
       var productLineItem = iter.next();
       var storeOrderAddress = productLineItem.getShipment().getShippingAddress();
       var storeAddress = {
@@ -197,7 +151,9 @@ function updateSelectedShippingMethod(basket, req) {
         lastName: storeOrderAddress.lastName || '',
         phone: storeOrderAddress.phone || ''
       };
-      boltShippingTaxHook.handleShippingSettings(basket, storeAddress);
+      boltShippingTaxHook.handleShippingSettings(cart, storeAddress); // only set the store address to the default shipping so only need to do it once
+
+      break;
     }
 
     boltPlaceOrder.handleShippingMethodID(shippingMethodId);
@@ -206,15 +162,17 @@ function updateSelectedShippingMethod(basket, req) {
 
   if (req.order && req.order.cart.shipments && req.order.cart.shipments.length !== 0) {
     var shippingMethodID = req.order.cart.shipments[0].reference;
-
     if (!empty(shippingMethodID)) {
       boltPlaceOrder.handleShippingMethodID(shippingMethodID);
       defaultShippingSelected = true;
     }
+
   } else if (req.cart && req.cart.shipments && req.cart.shipments.length !== 0) {
     var shippingAddress = req.cart.shipments[0].shipping_address;
     var shippingMethod = req.cart.shipments[0].service;
-    boltPlaceOrder.handleShippingMethod(shippingAddress, shippingMethod);
+
+    require('*/cartridge/scripts/checkout/boltPlaceOrder').handleShippingMethod(shippingAddress, shippingMethod);
+
     defaultShippingSelected = true;
   } else if (req.order && req.order.cart.in_store_shipments && req.order.cart.in_store_shipments !== 0) {
     boltPlaceOrder.handleShippingMethodID('ShipToStore');
@@ -223,7 +181,7 @@ function updateSelectedShippingMethod(basket, req) {
 
 
   if (hasEgiftCards) {
-    boltPlaceOrder.setGiftCardShipment(address, defaultShippingSelected);
+    boltPlaceOrder.handleGiftCardShipment(address, defaultShippingSelected);
   }
 }
 /**
@@ -312,18 +270,18 @@ function getGiftCertificateCode(boltLinkOrderID) {
 }
 /**
  * Attempts to create an order from the current basket
- * @param {Object} basket - current basket
+ * @param {Object} cart - current basket
  * @param {string} boltLinkOrderID - bolt order reference
  * @returns {Object} The order object created from the current basket
  */
 
 
-function createOrder(basket, boltLinkOrderID) {
+function createOrder(cart, boltLinkOrderID) {
   var order;
 
   try {
     order = Transaction.wrap(function () {
-      return OrderMgr.createOrder(basket, boltLinkOrderID);
+      return OrderMgr.createOrder(cart, boltLinkOrderID);
     });
   } catch (e) {
     log.error('Exception occurred while creating order: ' + e.message);
@@ -615,16 +573,7 @@ function validateCartTotalAmount(basket, cart) {
   var grossBasketAmount = basket.getTotalGrossPrice().value;
   var grossBasketLessTotalGCAmount = (grossBasketAmount - totalGCAmount - totalGiftCardAmount) * 100; // basket amount without the gift certificate amount, rounded
 
-  var roundedBasketAmountLessGCAmount = Math.round(grossBasketLessTotalGCAmount); // Log zero tax error
-
-  var totalTax = basket.getTotalTax();
-
-  if (!totalTax.available || totalTax.value === 0) {
-    log.error('basket total tax is unavailable, order id: {0}', cart.order_reference);
-  } else if (totalTax.value * 100 !== cart.tax_amount.amount) {
-    log.error('bolt tax amount {0} does not match with sfcc tax amount {1}, order id: {2}', cart.tax_amount.amount, totalTax.value, cart.order_reference);
-  } // Return an error if the amounts are off than the 1 cent tolerance
-
+  var roundedBasketAmountLessGCAmount = Math.round(grossBasketLessTotalGCAmount); // Return an error if the amounts are off than the 1 cent tolerance
 
   if (cart.total_amount.amount > roundedBasketAmountLessGCAmount + 1 || cart.total_amount.amount < roundedBasketAmountLessGCAmount - 1) {
     return new Error('pre-auth total amount validation failed for order id ' + cart.order_reference + ', bolt total amount ' + cart.total_amount.amount + ' does not match with sfcc total amount ' + grossBasketLessTotalGCAmount + ' [gift certificate total amount ' + totalGCAmount * 100 + ', basket gross price ' + grossBasketAmount * 100 + ']');
@@ -632,7 +581,7 @@ function validateCartTotalAmount(basket, cart) {
 
 
   if (cart.total_amount.amount !== roundedBasketAmountLessGCAmount) {
-    log.error("rounding error found at pre-auth total amount validation for order id {0},\n      bolt total amount {1} does not match with sfcc total amount {2}\n      [gift certificate total amount {3}, basket gross price {4}]", cart.order_reference, cart.total_amount.amount, (basket.totalGrossPrice.value - totalGCAmount) * 100, totalGCAmount * 100, basket.totalGrossPrice.value * 100);
+    log.error("rounding error found at pre-auth total amount validation for order id {0}, \n      bolt total amount {1} does not match with sfcc total amount {2} \n      [gift certificate total amount {3}, basket gross price {4}]", cart.order_reference, cart.total_amount.amount, (basket.totalGrossPrice.value - totalGCAmount) * 100, totalGCAmount * 100, basket.totalGrossPrice.value * 100);
   }
 
   return null;
@@ -644,7 +593,6 @@ function validateCartTotalAmount(basket, cart) {
 
 module.exports = {
   checkItemQuantity: checkItemQuantity,
-  shouldValidateInventory: shouldValidateInventory,
   validateProducts: validateProducts,
   updateSelectedShippingMethod: updateSelectedShippingMethod,
   prepareBillingAddress: prepareBillingAddress,
